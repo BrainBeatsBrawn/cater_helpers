@@ -17,6 +17,7 @@ module;
 #include <vector>
 #include <cmath>
 #include <tuple>
+#include <fstream>
 
 export module cater.helpers;
 
