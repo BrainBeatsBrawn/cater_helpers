@@ -152,6 +152,8 @@ export namespace cater::helpers
      *
      * \param dirns output. the computed agent directions
      *
+     * \param speed output. the time-averaged speed (may require some params)
+     *
      * \param block input. number of elements per block. A parameter
      *
      * \param max_delta_phi input. A threshold parameter
@@ -161,7 +163,7 @@ export namespace cater::helpers
     template <bool replace_uncertain_directions = false, bool fix_positions_with_invisibility_flag = false>
     std::tuple<sm::vvec<sm::vec<float, 2>>, sm::vvec<sm::vec<float, 2>>>
     process_positions (sm::vvec<sm::vec<float, 2>>& positions, sm::vvec<std::uint32_t>& antflags,
-                       sm::vvec<sm::vec<float, 2>>& dirns,
+                       sm::vvec<sm::vec<float, 2>>& dirns, sm::vvec<float>& speed,
                        const std::uint32_t block = 3, const float max_delta_phi = 2.8f)
     {
         // Find our instantaneous directions using the next datum
@@ -190,9 +192,11 @@ export namespace cater::helpers
             }
         }
 
+        speed.resize (positions.size(), 0.0f);
         for (std::uint32_t i = 0; i < positions.size() - 1; ++i) {
 
             dirns[i] = positions[i+1] - positions[i];
+            speed[i] = dirns[i].length();
             phi[i] = dirns[i].angle(); // initially -pi to pi
 
             if (i > 0) {
