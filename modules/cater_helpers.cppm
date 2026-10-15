@@ -24,6 +24,9 @@ export module cater.helpers;
 import sm.vvec;
 import sm.vec;
 import sm.algo;
+import craysim.visual;
+import mplot.colour;
+import mplot.tools;
 
 export namespace cater::helpers
 {
@@ -277,4 +280,164 @@ export namespace cater::helpers
         return { pos_orig, dirn_orig };
     }
 
+    // CATER-specific breadcrumb setup
+    template<int glver>
+    std::tuple<std::uint32_t, std::uint32_t> setup_breadcrumbs_from_sim_opts (craysim::visual<glver>& v,
+                                                                              const std::string& csv_path,
+                                                                              const std::int32_t argc, char* argv[])
+    {
+        std::uint32_t antid = 0u;
+        std::uint32_t routeidx = 0u;
+
+        sm::vvec<float> ant_speed;
+        // Some extra options for antpov only
+        bool apply_colour_labels = false;
+        bool colour_by_route = false; // colour by route or ant?
+
+        for (std::int32_t i = 0; i < argc; i++) {
+            std::string arg = std::string(argv[i]);
+            if (arg == "-R") {
+                colour_by_route = true; // I have a slightly hacky way to colour by route ID
+            } else if (arg == "-L") {
+                apply_colour_labels = true; // Set true to apply green-for-bush; grey-for-invisible
+            }
+        }
+        std::cout << "We are colouring ant trail by " << (colour_by_route ? "forage/run" : "ant") << std::endl;
+
+        // csv reading (comes between find_landscape and setup_landscape)
+
+        if (v.sim_opts.test (craysim::options::path_from_csv)) {
+            // Check if path encodes several paths
+            std::vector<std::string> cpaths = mplot::tools::stringToVector (csv_path, ",");
+            // Use cater::helpers::read_csv instead of craysim::read_csv as we are also reading flags
+            // Note that v.csv_positions is populated.
+            for (auto cpath : cpaths) {
+
+                std::cout << "Reading csv path " << cpath << std::endl;
+                if (cpath.find ("Ant12") != std::string::npos) {
+                    antid = 12;
+                } else if (cpath.find ("Ant11") != std::string::npos) {
+                    antid = 11;
+                } else if (cpath.find ("Ant06") != std::string::npos) {
+                    antid = 6;
+                } else if (cpath.find ("Ant03") != std::string::npos) {
+                    antid = 3;
+                }
+
+                // Get Ant index from position p to posn before 'R'
+                std::string::size_type lstart = cpath.find ("Ant") + 3;
+                std::string::size_type lend = cpath.find ("R", lstart);
+                if (lend == std::string::npos) {
+                    lend = cpath.find ("Z", lstart);
+                }
+                if (lend == std::string::npos) {
+                    std::cout << "Uh oh\n";
+                    return {0, 0};
+                }
+                if (cpath.find("ZVOP") != std::string::npos) {
+                    // ZVOP Zero Vector Opposite Side - Ant is allowed to go to nest but before arrival is
+                    // placed in opposite side of the feeding areay
+                    routeidx = 9999;
+                } else if (cpath.find("ZVSF") != std::string::npos) {
+                    // ZVOP Zero Vector Semi Familiar - Ant is allowed to go to nest but before arrival is
+                    // placed near but not at the feeding area
+                    routeidx = 8888;
+                } else if (cpath.find("ZVF") != std::string::npos) {
+                    // ZVOP Zero Vector Familiar - Ant is allowed to go to nest but before arrival is
+                    // placed back at the feeding area
+                    routeidx = 999;
+                } else {
+                    std::string::size_type iend = cpath.find_first_of ('_');
+                    routeidx = std::stoi (cpath.substr (lend + 1, iend - (lend + 1)));
+                }
+                std::cout << "Route index: " << routeidx << std::endl;
+
+                std::uint64_t existing = v.csv_positions.size();
+
+                std::uint32_t _routeidx = std::numeric_limits<std::uint32_t>::max(); // colour-by-antid is default
+                if (colour_by_route) { _routeidx = routeidx; }
+
+                if (cater::helpers::read_csv (cpath, v.csv_positions, v.csv_flags, antid, _routeidx) == false) {
+                    throw std::runtime_error ("Failed to read CSV file");
+                } else { std::cout << "Read " << (v.csv_positions.size() - existing) << " ant positions from CSV\n"; }
+            }
+
+            // Now process the positions to generate directions.
+            std::uint32_t block = 3;
+            float max_delta_phi = 2.8f;
+            sm::vvec<sm::vec<float, 2>> dirns (v.csv_positions.size(), sm::vec<float, 2>{}); // dummy, unused
+            cater::helpers::process_positions<false, true> (v.csv_positions, v.csv_flags, dirns, ant_speed, block, max_delta_phi);
+            // for each antflag, set dirn uncertain flag
+        }
+
+        v.setup_breadcrumbs (32000); // enough to show a whole path/all paths from csv
+        v.bc_mult = 2.0f; // 1 is default
+        v.breadcrumb_every = 10;
+
+        // Turn antflags into colour info, all at the start:
+        sm::flags<cater::helpers::antflags> aflags;
+        v.bc_clr.resize (1 + v.csv_flags.size() / v.breadcrumb_every);
+        v.bc_alpha.resize (1 + v.csv_flags.size() / v.breadcrumb_every);
+        v.bc_scale.resize (1 + v.csv_flags.size() / v.breadcrumb_every);
+        std::uint32_t i = 0;
+        for (std::uint32_t j = 0; j < v.csv_flags.size(); ++j) {
+            if (j % v.breadcrumb_every == 0u) {
+                aflags = v.csv_flags[j];
+                // Use a 'base ant index' colour:
+                if (aflags.test (cater::helpers::antflags::ant15)) { // There was no ant 15, this is used to flag for ZVF colour
+                    v.bc_clr[i] = mplot::colour::bisque2; // ZVF. A white.
+                } else if (aflags.test (cater::helpers::antflags::ant14)) { // Hack to colour by routeID 1
+                    v.bc_clr[i] = mplot::colour::sandybrown;
+                } else if (aflags.test (cater::helpers::antflags::ant13)) { // routeID 2
+                    v.bc_clr[i] = mplot::colour::orangered2;
+                    // routeID 3 is darkorange2 (ant12), so that works for both colour schemes
+                    // routeID 4 is coral2 (maroon2 if ant11)
+
+                } else if (aflags.test (cater::helpers::antflags::ant10)) { // routeID 5
+                    v.bc_clr[i] = mplot::colour::tan1;
+                } else if (aflags.test (cater::helpers::antflags::ant9)) { // routeID 6
+                    v.bc_clr[i] = mplot::colour::chocolate3;
+                } else if (aflags.test (cater::helpers::antflags::ant8)) { // routeID 7
+                    v.bc_clr[i] = mplot::colour::cadmiumorange;
+                } else if (aflags.test (cater::helpers::antflags::ant7)) { // routeID 8
+                    v.bc_clr[i] = mplot::colour::sienna2;
+
+                } else if (aflags.test (cater::helpers::antflags::ant3)) {
+                    v.bc_clr[i] = mplot::colour::dodgerblue3;
+                } else if (aflags.test (cater::helpers::antflags::ant6)) {
+                    v.bc_clr[i] = mplot::colour::springgreen2;
+                } else if (aflags.test (cater::helpers::antflags::ant11)) {
+                    if (colour_by_route) {
+                        v.bc_clr[i] = mplot::colour::coral2;
+                    } else {
+                        v.bc_clr[i] = mplot::colour::maroon2;
+                    }
+                } else if (aflags.test (cater::helpers::antflags::ant12)) {
+                    v.bc_clr[i] = mplot::colour::darkorange2;
+                } else {
+                    // Default to Out/back colour selection (ant0)
+                    v.bc_clr[i] = aflags.test (cater::helpers::antflags::cookie) ? mplot::colour::deepskyblue2 : mplot::colour::flesh;
+                }
+                if (apply_colour_labels) {
+                    if (aflags.test (cater::helpers::antflags::direction_uncertain)) {
+                        v.bc_clr[i] = mplot::colour::grey40;
+                    } else if (aflags.test (cater::helpers::antflags::invisible)) {
+                        v.bc_clr[i] = mplot::colour::grey60;
+                    } else if (aflags.test (cater::helpers::antflags::bush)) {
+                        v.bc_clr[i] = mplot::colour::darkgreen;
+                    }
+                }
+                if (i % 2 == 0) {
+                    v.bc_alpha[i] = 1.0f;
+                    v.bc_scale[i] = 1.0f;
+                } else {
+                    v.bc_alpha[i] = 1.0f;
+                    v.bc_scale[i] = 1.0f;
+                }
+                ++i;
+            }
+        }
+
+        return {antid, routeidx};
+    }
 } // namespace caterhelp
